@@ -24,13 +24,12 @@ from datetime import datetime
 if "groc_api_key" not in st.session_state:
     try:
         with open("api.txt", "r") as f:
-            raw = f.read().strip()
-            st.session_state.groc_api_key = raw.strip('"')
+            st.session_state.groc_api_key = f.read().strip()
     except Exception:
         st.session_state.groc_api_key = ""
 
 if not st.session_state.groc_api_key:
-    st.session_state.groc_api_key = "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"
+    st.warning("No valid  found. Please add your key to api.txt.")
 
 if "groc_base_url" not in st.session_state:
     st.session_state.groc_base_url = "https://api.groq.com/openai/v1"
@@ -105,6 +104,14 @@ try:
 except ImportError:
     FITZ_AVAILABLE = False
 
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+    YOLO_FACE_MODEL_PATH = "face_yolov8n.pt"  # Update this path to your YOLO face model
+except ImportError:
+    YOLO_AVAILABLE = False
+    st.warning("⚠️ YOLO (ultralytics) not available. Install with: pip install ultralytics")
+
 # Additional required imports are already included above
 
 # Initialize Hugging Face embedding model once (if available)
@@ -145,10 +152,9 @@ AGENT_SYSTEM_PROMPTS = {
         "output_description": "Summary of job requirements, summary of candidate qualifications, and fit analysis."
     },
     "Interview Question Generator": {
-        "prompt": "You are an HR expert tasked with designing interview questions. "
-                  "Given a job description, the candidate's CV content, and a similarity score >= 0.5, generate 5 potential interview questions related to the field of work and the candidate's qualifications.",
-        "inputs": ["Job Description", "Candidate Resume Content", "Similarity Score"],
-        "output_description": "Five targeted interview questions for candidate assessment."
+        "prompt": "You are an HR expert tasked with designing interview questions. Given a list of job requirements, generate 5 multiple-choice (QCM) interview questions that specifically test knowledge of those requirements. Each question must be directly related to the provided job requirements, and not generic or based on the candidate. Each question should have 4 options (A, B, C, D) and indicate the correct answer. Format: Q: ...\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: X\n.",
+        "inputs": ["Job Requirements"],
+        "output_description": "Five QCM (multiple-choice) interview questions for candidate assessment, with interactive quiz and scoring. All questions must be about the posted job requirements."
     }
 }
 
@@ -213,124 +219,67 @@ def compute_similarity(api_key, text1, text2):
         return 0.5  # Default moderate similarity
 
 # --- Real Face Authentication Functions ---
-def extract_face_from_pdf(pdf_file_bytes):
-    """Extract face encoding from CV PDF using face_recognition with robust error handling."""
-    st.info("🔍 Attempting to extract face from CV PDF...")
-    
-    # Check if face_recognition is available
-    if not FACE_RECOGNITION_AVAILABLE:
-        st.warning("⚠️ face_recognition library not available. Using fallback mode.")
-        return "fallback_face_encoding"  # Return a placeholder
-    
+def detect_face_yolo(image):
+    """Detect faces in a PIL image using YOLO and return cropped face images and bounding boxes."""
+    if not YOLO_AVAILABLE:
+        return []
     try:
-        import face_recognition
-        from PIL import Image
-        
-        # Try PyMuPDF first
-        if FITZ_AVAILABLE:
-            try:
-                import fitz  # PyMuPDF
-                doc = fitz.open(stream=pdf_file_bytes, filetype="pdf")
-                for page_num, page in enumerate(doc):
-                    images = page.get_images(full=True)
-                    st.info(f"📄 Checking page {page_num + 1}, found {len(images)} images")
-                    
-                    for img_index, img in enumerate(images):
-                        try:
-                            xref = img[0]
-                            base_image = doc.extract_image(xref)
-                            image_bytes = base_image["image"]
-                            image = Image.open(io.BytesIO(image_bytes))
-                            
-                            # Convert to RGB if needed
-                            if image.mode != 'RGB':
-                                image = image.convert('RGB')
-                            
-                            # Detect face and encode
-                            st.info(f"🔍 Analyzing image {img_index + 1} for faces...")
-                            face_encodings = face_recognition.face_encodings(np.array(image))
-                            
-                            if face_encodings:
-                                st.success(f"✅ Face detected in image {img_index + 1}!")
-                                doc.close()
-                                return face_encodings[0]  # Return the first face encoding
-                        except Exception as img_error:
-                            st.warning(f"⚠️ Error processing image {img_index + 1}: {img_error}")
-                            continue
-                
-                doc.close()
-            except Exception as fitz_error:
-                st.warning(f"⚠️ PyMuPDF extraction failed: {fitz_error}")
-        
-        # Fallback: Try to extract from first page as image
-        try:
-            from PIL import Image
-            import fitz
-            doc = fitz.open(stream=pdf_file_bytes, filetype="pdf")
-            page = doc[0]  # First page
-            pix = page.get_pixmap()
-            img_data = pix.tobytes("png")
-            image = Image.open(io.BytesIO(img_data))
-            
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            st.info("🔍 Analyzing full page as image for faces...")
-            face_encodings = face_recognition.face_encodings(np.array(image))
-            
-            if face_encodings:
-                st.success("✅ Face detected in full page!")
-                doc.close()
-                return face_encodings[0]
-            
-            doc.close()
-        except Exception as page_error:
-            st.warning(f"⚠️ Full page analysis failed: {page_error}")
-        
-        st.warning("⚠️ No face detected in CV PDF. Using fallback mode.")
-        return "fallback_face_encoding"  # Return placeholder for testing
-        
-    except ImportError as import_error:
-        st.error(f"❌ Import error: {import_error}")
-        return "fallback_face_encoding"
+        model = YOLO(YOLO_FACE_MODEL_PATH)
+        results = model.predict(image)
+        faces = []
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                face_img = image.crop((x1, y1, x2, y2))
+                faces.append({"img": face_img, "box": (x1, y1, x2, y2)})
+        return faces
     except Exception as e:
-        st.error(f"❌ Error extracting face from CV PDF: {e}")
-        return "fallback_face_encoding"
+        st.warning(f"YOLO face detection failed: {e}")
+        return []
 
-def authenticate_face_live(cv_face_encoding):
-    """Authenticate live face using webcam feed and compare with CV face encoding."""
-    st.subheader("🎥 Live Face Authentication")
-    
-    # Check if we have a valid face encoding
-    if cv_face_encoding is None:
-        st.error("❌ CV face encoding not available. Please upload a valid CV PDF.")
+def extract_face_from_pdf(pdf_file_bytes):
+    """Extract the first detected face image from the CV PDF using YOLO for face detection."""
+    st.info("🔍 Attempting to detect face in CV PDF using YOLO...")
+    if not YOLO_AVAILABLE:
+        st.warning("⚠️ YOLO not available. Using fallback mode.")
+        return None
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_file_bytes, filetype="pdf")
+        for page_num, page in enumerate(doc):
+            images = page.get_images(full=True)
+            for img_index, img in enumerate(images):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+                    faces = detect_face_yolo(image)
+                    if faces:
+                        st.success(f"✅ Face detected in image {img_index + 1} (YOLO)!")
+                        doc.close()
+                        # Return the first detected face image for later matching
+                        return faces[0]["img"]
+                except Exception as img_error:
+                    st.warning(f"⚠️ Error processing image {img_index + 1}: {img_error}")
+                    continue
+        doc.close()
+        st.warning("⚠️ No face detected in CV PDF (YOLO). Using fallback mode.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Error detecting face from CV PDF: {e}")
+        return None
+
+def authenticate_face_live(cv_face_status):
+    """Authenticate live face using webcam feed and YOLO for detection (no recognition)."""
+    st.subheader("🎥 Live Face Authentication (YOLO only)")
+
+    if cv_face_status is None or cv_face_status == "fallback_face_detected":
+        st.error("❌ No face detected in CV. Please upload a valid CV PDF with a visible face.")
         return False
-    
-    # Handle fallback mode
-    if isinstance(cv_face_encoding, str) and cv_face_encoding == "fallback_face_encoding":
-        st.info("⚠️ Fallback authentication mode (simplified)")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Simulate Successful Auth", key="fallback_success"):
-                st.session_state.candidate_authenticated = True
-                st.session_state.authentication_required = False
-                st.success("✅ Authentication successful (simulated)!")
-                st.balloons()
-                st.rerun()
-                
-        with col2:
-            if st.button("❌ Skip Authentication", key="fallback_skip"):
-                st.session_state.candidate_authenticated = True
-                st.session_state.authentication_required = False
-                st.info("ℹ️ Authentication skipped!")
-                st.rerun()
-        
-        return False
-    
-    # Real face authentication with webcam
-    if not WEBRTC_AVAILABLE or not FACE_RECOGNITION_AVAILABLE:
-        st.warning("⚠️ WebRTC or face_recognition not available. Using simplified mode.")
+
+    if not (WEBRTC_AVAILABLE and YOLO_AVAILABLE):
+        st.warning("⚠️ WebRTC or YOLO not available. Using simplified mode.")
         if st.button("🎥 Simulate Webcam Auth", key="simulate_webcam"):
             st.session_state.candidate_authenticated = True
             st.session_state.authentication_required = False
@@ -338,53 +287,53 @@ def authenticate_face_live(cv_face_encoding):
             st.balloons()
             st.rerun()
         return False
-    
+
     try:
         import cv2
-        import face_recognition
         from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
-        
-        class FaceAuthProcessor(VideoProcessorBase):
+
+        class YOLOFaceDetectProcessor(VideoProcessorBase):
             def __init__(self):
                 self.auth_successful = False
                 self.auth_message = "Ready for authentication"
                 self.frame_count = 0
+                self.model = YOLO(YOLO_FACE_MODEL_PATH)
 
             def recv(self, frame):
                 self.frame_count += 1
                 img = frame.to_ndarray(format="bgr24")
-                
-                # Process every 30th frame for performance
-                if self.frame_count % 30 == 0:
-                    try:
-                        # Resize frame for faster processing
-                        small_frame = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
-                        rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-                        
-                        face_locations = face_recognition.face_locations(rgb_frame)
-                        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+                display_img = img.copy()
 
-                        for face_encoding in face_encodings:
-                            match = face_recognition.compare_faces([cv_face_encoding], face_encoding, tolerance=0.6)
-                            if any(match):
-                                self.auth_successful = True
-                                self.auth_message = "✅ Face authentication successful!"
-                                break
+                # Process every 15th frame for performance
+                if self.frame_count % 15 == 0:
+                    try:
+                        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                        results = self.model.predict(pil_img)
+                        faces = []
+                        for r in results:
+                            for box in r.boxes:
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                faces.append((x1, y1, x2, y2))
+                                cv2.rectangle(display_img, (x1, y1), (x2, y2), (0,255,0), 2)
+                        if faces:
+                            self.auth_successful = True
+                            self.auth_message = "✅ Face detected! Authentication successful."
+                        else:
+                            self.auth_message = "No face detected."
                     except Exception as e:
                         self.auth_message = f"⚠️ Processing error: {str(e)}"
 
-                return av.VideoFrame.from_ndarray(img, format="bgr24")
+                return av.VideoFrame.from_ndarray(display_img, format="bgr24")
 
         st.info("💡 Look at the camera for face authentication...")
-        
-        # Configure WebRTC
+
         rtc_configuration = RTCConfiguration({
             "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
         })
-        
+
         ctx = webrtc_streamer(
-            key="face_auth",
-            video_processor_factory=FaceAuthProcessor,
+            key="face_auth_yolo",
+            video_processor_factory=YOLOFaceDetectProcessor,
             rtc_configuration=rtc_configuration,
             media_stream_constraints={"video": True, "audio": False}
         )
@@ -398,17 +347,15 @@ def authenticate_face_live(cv_face_encoding):
                 return True
             else:
                 st.info(ctx.video_processor.auth_message)
-        
-        # Provide manual override option
+
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("� Force Authentication Success", key="force_auth_success"):
+            if st.button("✅ Force Authentication Success", key="force_auth_success"):
                 st.session_state.candidate_authenticated = True
                 st.session_state.authentication_required = False
                 st.success("✅ Authentication forced successful!")
                 st.rerun()
-        
         with col2:
             if st.button("⏭️ Skip Authentication", key="skip_auth_real"):
                 st.session_state.candidate_authenticated = True
@@ -426,50 +373,42 @@ def authenticate_face_live(cv_face_encoding):
 
     return False
 
-def authenticate_face_real(cv_face_encoding, candidate_image):
-    """Real face authentication using face_recognition library - strict matching"""
-    if not FACE_RECOGNITION_AVAILABLE:
-        return False, "Face recognition library not available"
-    
+def authenticate_face_real(cv_face_status, candidate_image):
+    """Authenticate by matching the candidate's face with the face extracted from the CV using face_recognition."""
+    if not YOLO_AVAILABLE or not FACE_RECOGNITION_AVAILABLE:
+        return False, "YOLO or face_recognition not available"
     try:
-        import face_recognition
+        # Get face from candidate image
+        candidate_faces = detect_face_yolo(candidate_image.convert('RGB'))
+        if not candidate_faces:
+            return False, "No face detected in uploaded photo."
+        candidate_face_img = candidate_faces[0]["img"]
+        # Get face from CV (already extracted and stored in session_state.cv_face_encoding)
+        cv_face_img = st.session_state.get('cv_face_encoding', None)
+        if cv_face_img is None:
+            return False, "No face detected in CV."
+        # Convert PIL images to numpy arrays (RGB)
         import numpy as np
-        
-        # Convert PIL image to numpy array
-        candidate_array = np.array(candidate_image)
-        
-        # Handle fallback encoding
-        if isinstance(cv_face_encoding, str):
-            return False, "Invalid CV face encoding - please re-upload CV with clear face photo"
-        
-        # Get face encodings from candidate image
-        candidate_encodings = face_recognition.face_encodings(candidate_array)
-        
-        if not candidate_encodings:
-            return False, "No face detected in uploaded photo - please upload a clear face photo"
-        
-        # Compare faces with strict tolerance
-        matches = face_recognition.compare_faces([cv_face_encoding], candidate_encodings[0], tolerance=0.5)
-        
-        if matches[0]:
-            # Calculate face distance for additional verification
-            face_distance = face_recognition.face_distance([cv_face_encoding], candidate_encodings[0])[0]
-            confidence = (1 - face_distance) * 100
-            
-            if confidence >= 60:  # Require at least 60% confidence
-                return True, f"Face match confirmed! Confidence: {confidence:.1f}%"
-            else:
-                return False, f"Face similarity too low ({confidence:.1f}%) - authentication failed"
+        import face_recognition
+        candidate_np = np.array(candidate_face_img.convert('RGB'))
+        cv_np = np.array(cv_face_img.convert('RGB'))
+        # Get face encodings
+        candidate_encs = face_recognition.face_encodings(candidate_np)
+        cv_encs = face_recognition.face_encodings(cv_np)
+        if not candidate_encs or not cv_encs:
+            return False, "Could not extract face encodings. Make sure both images have clear faces."
+        # Compare faces
+        match = face_recognition.compare_faces([cv_encs[0]], candidate_encs[0])[0]
+        if match:
+            return True, "Face match! Authentication successful."
         else:
-            return False, "Face does not match CV photo - authentication failed"
-            
+            return False, "Face does not match the CV photo."
     except Exception as e:
         return False, f"Authentication error: {str(e)}"
 
-def authenticate_face_simple(cv_face_encoding, candidate_image):
-    """Simplified face authentication with basic validation"""
-    # Redirect to real authentication
-    return authenticate_face_real(cv_face_encoding, candidate_image)
+def authenticate_face_simple(cv_face_status, candidate_image):
+    """Simplified face authentication with YOLO only."""
+    return authenticate_face_real(cv_face_status, candidate_image)
 
 # --- Groq API Call Function ---
 def get_llama_response(api_key, agent_name, user_inputs_dict):
@@ -511,10 +450,10 @@ st.caption("Powered by Groq llama3-8b-8192 | Enhanced CI/CD Pipeline")
 with st.sidebar:
     st.header("🔧 Configuration")
     st.session_state.groc_api_key = st.text_input(
-        "Groq API Key",
+        " ",
         type="password",
         value=st.session_state.groc_api_key,
-        help="Get your Groq API key from your provider"
+        help="Get your  from your provider"
     )
     st.session_state.groc_base_url = st.text_input(
         "Groq API Base URL",
@@ -545,7 +484,7 @@ with st.sidebar:
 
 # --- Main Area ---
 if not st.session_state.groc_api_key:
-    st.info("🔑 Enter your Groq API Key in the sidebar to begin.")
+    st.info("🔑 Enter your  in the sidebar to begin.")
     st.stop()
 
 # --- Global CV Input Area ---
@@ -573,21 +512,15 @@ if uploaded_cv_pdf is not None:
                     st.sidebar.info(f"📝 Text length: {len(extracted_text)} characters")
                     
                     # Extract face encoding from CV
-                    face_encoding = extract_face_from_pdf(pdf_bytes)
-                    if face_encoding is not None:
-                        st.session_state.cv_face_encoding = face_encoding
-                        if isinstance(face_encoding, str) and face_encoding == "fallback_face_encoding":
-                            st.sidebar.warning(f"⚠️ CV Processed: {uploaded_cv_pdf.name}")
-                            st.sidebar.info("ℹ️ Using fallback face encoding - Authentication will be simplified")
-                        else:
-                            st.sidebar.success(f"✅ CV Processed: {uploaded_cv_pdf.name}")
-                            st.sidebar.success("👤 Face detected - Full authentication enabled!")
-                        
-                        # Only set authentication_required if we're dealing with Interview Question Generator
+                    face_img = extract_face_from_pdf(pdf_bytes)
+                    if face_img is not None:
+                        st.session_state.cv_face_encoding = face_img
+                        st.sidebar.success(f"✅ CV Processed: {uploaded_cv_pdf.name}")
+                        st.sidebar.success("👤 Face detected - Full authentication enabled!")
                         if selected_agent_name == "Interview Question Generator":
                             st.session_state.authentication_required = True
                     else:
-                        st.session_state.cv_face_encoding = "fallback_face_encoding"  # Provide fallback
+                        st.session_state.cv_face_encoding = None
                         st.sidebar.warning(f"⚠️ CV Processed: {uploaded_cv_pdf.name}")
                         st.sidebar.info("ℹ️ No face detected - Using simplified authentication")
                         st.session_state.authentication_required = False
@@ -658,7 +591,25 @@ if selected_agent_name:
 
     inputs_for_api_call = {}
 
+    # --- File Save Helpers ---
+    import json
+    def save_to_file(filename, data, mode='w'):
+        with open(filename, mode, encoding='utf-8') as f:
+            if filename.endswith('.json'):
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            else:
+                f.write(data)
+
     # --- Agent-Specific Input Fields ---
+    # --- Job Description Writer Save ---
+    if selected_agent_name == "Job Description Writer":
+        # ...existing code...
+        if st.session_state.last_agent_output:
+            if st.button("💾 Save Job Description to File", key="save_jobdesc_btn"):
+                save_to_file("job_description.txt", st.session_state.last_agent_output)
+                st.success("Job description saved to job_description.txt!")
+
+    # --- Candidate Screener Save ---
     if selected_agent_name == "Candidate Screener":
         jd_widget_key = f"{selected_agent_name}_Job Description_input"
         st.text_area(
@@ -669,6 +620,11 @@ if selected_agent_name:
         )
         if not st.session_state.cv_text:
             st.warning("⚠️ Please upload and process a Candidate CV PDF from the sidebar.")
+        # Save candidate screening result
+        if st.session_state.last_agent_output:
+            if st.button("💾 Save Candidate Screening to File", key="save_screen_btn"):
+                save_to_file("candidate_screening.txt", st.session_state.last_agent_output)
+                st.success("Candidate screening saved to candidate_screening.txt!")
 
     elif selected_agent_name == "CV-to-Requirements Matcher":
         req_widget_key = f"{selected_agent_name}_Job Requirements_input"
@@ -683,48 +639,24 @@ if selected_agent_name:
         if not st.session_state.cv_text:
             st.warning("⚠️ Please upload and process a Candidate CV PDF from the sidebar.")
     
+
     elif selected_agent_name == "Interview Question Generator":
         sim = st.session_state.get("req_cv_similarity", 0.0)
         st.markdown(f"**📊 Current Similarity Score:** {sim:.4f}")
-        
         if sim < 0.5:
             st.warning("⚠️ Similarity below 0.50 threshold – interview questions cannot be generated.")
         else:
             st.success("✅ Similarity threshold met!")
-
-            # Strict face authentication handling - NO BYPASS OPTIONS
+            # Strict face authentication handling
             if st.session_state.get('cv_face_encoding') is not None:
                 if not st.session_state.get('candidate_authenticated', False):
-                    st.error("🔒 **FACE AUTHENTICATION REQUIRED** - You must authenticate using facial recognition to access interview questions.")
+                    st.error("🔒 **FACE AUTHENTICATION REQUIRED** - You must authenticate using facial recognition to generate and access interview questions.")
                     st.session_state.authentication_required = True
-                    
-                    # Show authentication status
-                    st.info("📋 **Authentication Steps:**")
-                    st.info("1. 📄 CV uploaded and face detected ✅")
-                    st.info("2. 🎥 Live facial recognition authentication ❌ (Required)")
-                    st.info("3. ❓ Interview questions access ❌ (Locked)")
-                    
-                    st.markdown("---")
-                    st.subheader("🎥 **FACIAL RECOGNITION AUTHENTICATION**")
-                    st.error("⚠️ **STRICT AUTHENTICATION MODE** - Real face matching required!")
-                    
-                    cv_face_encoding = st.session_state.get('cv_face_encoding')
-                    
-                    # Show authentication requirements
-                    st.info("📋 **Authentication Requirements:**")
-                    st.info("✅ CV uploaded and face detected")
-                    st.info("❌ Live face must match CV face exactly")
-                    st.info("❌ Access to interview questions locked until authenticated")
-                    
-                    st.markdown("---")
-                    
-                    # Authentication method selection - ONLY real methods
                     auth_method = st.radio(
                         "**Select Facial Recognition Method:**",
                         ["🎥 Live Webcam Authentication", "📸 Upload Photo Authentication"],
                         key="auth_method_selection"
                     )
-                    
                     if auth_method == "🎥 Live Webcam Authentication":
                         st.markdown("**🎥 Live Webcam Face Authentication**")
                         st.info("💡 **Instructions:**")
@@ -733,15 +665,16 @@ if selected_agent_name:
                         st.info("3. Look directly at the camera")
                         st.info("4. System will compare your live face with CV face")
                         st.info("5. Authentication succeeds only on exact match")
-                        
                         if st.button("🎥 Start Live Face Authentication", type="primary", key="start_live_auth"):
                             st.session_state.show_live_auth = True
-                        
                         if st.session_state.get('show_live_auth', False):
-                            auth_result = authenticate_face_live(cv_face_encoding)
+                            auth_result = authenticate_face_live(st.session_state.get('cv_face_encoding'))
                             if auth_result:
                                 st.session_state.show_live_auth = False
-                                
+                                st.session_state.candidate_authenticated = True
+                                st.session_state.authentication_required = False
+                                st.success("✅ Authentication successful! You can now generate the QCM.")
+                                st.rerun()
                     else:
                         st.markdown("**📸 Photo Upload Face Authentication**")
                         st.info("💡 **Instructions:**")
@@ -749,21 +682,17 @@ if selected_agent_name:
                         st.info("2. Face must be clearly visible")
                         st.info("3. System will compare uploaded photo with CV face")
                         st.info("4. Authentication succeeds only on exact match")
-                        
                         candidate_photo = st.file_uploader(
                             "Upload your photo for authentication",
                             type=["jpg", "jpeg", "png"],
                             key="candidate_photo_uploader"
                         )
-                        
                         if candidate_photo is not None:
                             image = Image.open(candidate_photo)
                             st.image(image, caption="Your Photo", width=300)
-                            
                             if st.button("🔍 Authenticate Face", type="primary", key="auth_photo_btn"):
                                 with st.spinner("🔒 Performing facial recognition authentication..."):
-                                    is_match, message = authenticate_face_real(cv_face_encoding, image)
-                                    
+                                    is_match, message = authenticate_face_real(st.session_state.get('cv_face_encoding'), image)
                                     if is_match:
                                         st.session_state.candidate_authenticated = True
                                         st.session_state.authentication_required = False
@@ -773,19 +702,129 @@ if selected_agent_name:
                                     else:
                                         st.error(f"❌ **AUTHENTICATION FAILED!** {message}")
                                         st.error("🚫 Access to interview questions remains locked.")
-                    
-                    st.markdown("---")
-                    st.warning("⚠️ **NO BYPASS OPTIONS** - Real facial recognition matching is required for security.")
-                    
                 else:
-                    st.success("✅ **AUTHENTICATED!** Candidate face verified! Ready for interview questions.")
+                    st.success("✅ **AUTHENTICATED!** Candidate face verified! You can now generate and pass the QCM.")
                     st.info("📋 **Authentication Complete:**")
                     st.info("1. 📄 CV uploaded and face detected ✅")
                     st.info("2. 🎥 Live facial recognition authentication ✅")
                     st.info("3. ❓ Interview questions access ✅ (Unlocked)")
+
+                    # --- QCM Generation and Quiz ---
+                    req_widget_key = f"{selected_agent_name}_Job Requirements_input"
+                    default_requirements = st.session_state.get(req_widget_key, "") or st.session_state.get("last_agent_output", "")
+                    job_requirements = st.text_area(
+                        "📝 Input: Job Requirements",
+                        value=default_requirements,
+                        key=req_widget_key,
+                        height=200
+                    )
+                    if st.button("� Générer le QCM à partir des exigences du poste", key="generate_qcm_btn", type="primary"):
+                        # Prepare API call for QCM generation
+                        inputs_for_api_call = {"Job Requirements": job_requirements}
+                        with st.spinner("🤖 Génération du QCM en cours..."):
+                            try:
+                                response = get_llama_response(
+                                    st.session_state.groc_api_key,
+                                    selected_agent_name,
+                                    inputs_for_api_call
+                                )
+                                if response:
+                                    st.session_state.last_agent_output = response
+                                    st.session_state.show_qcm_modal = True
+                                else:
+                                    st.error("❌ No response received from the agent")
+                            except Exception as e:
+                                st.error(f"❌ Error generating QCM: {str(e)}")
+
+                    # --- Save QCM Score and Metadata ---
+
+                    if st.session_state.get("qcm_submitted", False):
+                        # Save score and metadata after quiz is submitted
+                        # Re-parse matches for this scope
+                        import re
+                        qcm_text = st.session_state.get("last_agent_output", "")
+                        qcm_pattern = re.compile(r"Q: (.*?)\nA\) (.*?)\nB\) (.*?)\nC\) (.*?)\nD\) (.*?)\nAnswer: ([A-D])", re.DOTALL)
+                        matches_local = qcm_pattern.findall(qcm_text)
+                        if st.button("💾 Save QCM Score & Metadata", key="save_qcm_score_btn"):
+                            candidate_meta = {
+                                "score": st.session_state.get("qcm_score", 0),
+                                "total_questions": len(matches_local),
+                                "timestamp": str(datetime.now()),
+                                "cv_file": st.session_state.get('cv_pdf_processed_filename', ''),
+                                "job_requirements": job_requirements,
+                                "answers": st.session_state.qcm_answers,
+                                "correct_answers": [m[5] for m in matches_local],
+                            }
+                            # Append to all_scores.json (list of dicts)
+                            import os
+                            all_scores_path = os.path.abspath("all_scores.json")
+                            all_scores = []
+                            try:
+                                if os.path.exists(all_scores_path):
+                                    with open(all_scores_path, 'r', encoding='utf-8') as f:
+                                        all_scores = json.load(f)
+                            except Exception as e:
+                                st.warning(f"⚠️ Could not read all_scores.json: {e}. Starting new file.")
+                                all_scores = []
+                            all_scores.append(candidate_meta)
+                            try:
+                                with open(all_scores_path, 'w', encoding='utf-8') as f:
+                                    json.dump(all_scores, f, ensure_ascii=False, indent=2)
+                                st.info(f"✅ Saved to: {all_scores_path}")
+                            except Exception as e:
+                                st.error(f"❌ Failed to save all_scores.json: {e}")
+                            save_to_file("candidate_qcm_results.json", candidate_meta)
+                            st.success("QCM score and metadata saved to candidate_qcm_results.json and all_scores.json!")
+
+                    if st.session_state.get("show_qcm_modal", False) and st.session_state.last_agent_output:
+                        import re
+                        st.markdown("---")
+                        st.subheader("📝 QCM Quiz - Répondez aux 5 questions")
+                        qcm_text = st.session_state.get("last_agent_output", "")
+                        qcm_pattern = re.compile(r"Q: (.*?)\nA\) (.*?)\nB\) (.*?)\nC\) (.*?)\nD\) (.*?)\nAnswer: ([A-D])", re.DOTALL)
+                        matches = qcm_pattern.findall(qcm_text)
+                        if not matches:
+                            st.error("❌ Impossible de parser le QCM. Veuillez régénérer les questions.")
+                        else:
+                            if "qcm_answers" not in st.session_state or not isinstance(st.session_state.qcm_answers, list):
+                                st.session_state.qcm_answers = [None]*len(matches)
+                            if "qcm_submitted" not in st.session_state:
+                                st.session_state.qcm_submitted = False
+                            with st.form("qcm_form"):
+                                for idx, (q, a, b, c, d, correct) in enumerate(matches):
+                                    st.markdown(f"**Q{idx+1}. {q.strip()}**")
+                                    current_answer = st.session_state.qcm_answers[idx] if idx < len(st.session_state.qcm_answers) and st.session_state.qcm_answers[idx] is not None else "A"
+                                    st.session_state.qcm_answers[idx] = st.radio(
+                                        label="",
+                                        options=["A", "B", "C", "D"],
+                                        format_func=lambda x: f"{x}) { [a,b,c,d][ord(x)-ord('A')] }",
+                                        key=f"qcm_q_{idx}_answer",
+                                        index=["A", "B", "C", "D"].index(current_answer)
+                                    )
+                                submitted = st.form_submit_button("Valider mes réponses")
+                                if submitted:
+                                    score = 0
+                                    for idx, (_, _, _, _, _, correct) in enumerate(matches):
+                                        user_ans = st.session_state.qcm_answers[idx]
+                                        if user_ans == correct:
+                                            score += 1
+                                    st.session_state.qcm_submitted = True
+                                    st.session_state.qcm_score = score
+                        if st.session_state.get("qcm_submitted", False):
+                            score = st.session_state.get("qcm_score", 0)
+                            st.success(f"Votre score: {score} / {len(matches)}")
+                            if score == len(matches):
+                                st.balloons()
+                        if st.button("❌ Fermer le QCM", key="close_qcm_modal"):
+                            st.session_state.show_qcm_modal = False
+                            st.session_state.qcm_submitted = False
+                            st.session_state.qcm_score = 0
+                            try:
+                                st.rerun()
+                            except AttributeError:
+                                pass
             else:
                 st.error("❌ **NO FACE DETECTED** - Please upload a CV PDF containing a clear face photo.")
-                st.info("� **Requirements:**")
                 st.info("• CV must be a PDF file")
                 st.info("• CV must contain at least one clear face photo")
                 st.info("• Face must be clearly visible and unobstructed")
@@ -927,13 +966,95 @@ if selected_agent_name:
                             
                             st.markdown("---")
                             st.subheader(f"🎯 {agent_config['output_description']}")
-                            st.write(response)
-                            
+
+                            # --- QCM Modal/Popup for Interview Question Generator ---
+                            if selected_agent_name == "Interview Question Generator":
+                                import re
+                                def parse_qcm_questions(text):
+                                    # Parse QCM questions from LLM output
+                                    pattern = re.compile(r"Q:\s*(.*?)\nA\)\s*(.*?)\nB\)\s*(.*?)\nC\)\s*(.*?)\nD\)\s*(.*?)\nAnswer:\s*([A-D])", re.DOTALL)
+                                    matches = pattern.findall(text)
+                                    questions = []
+                                    for m in matches:
+                                        q, a, b, c, d, ans = m
+                                        questions.append({
+                                            "question": q.strip(),
+                                            "options": [a.strip(), b.strip(), c.strip(), d.strip()],
+                                            "answer": ans.strip().upper()
+                                        })
+                                    return questions
+
+                                qcm_questions = parse_qcm_questions(response)
+                                if not qcm_questions or len(qcm_questions) < 1:
+                                    st.error("❌ Could not parse QCM questions. Please check the LLM output format.")
+                                    st.write(response)
+                                else:
+                                    # Modal state
+                                    if "show_qcm_modal" not in st.session_state:
+                                        st.session_state.show_qcm_modal = False
+                                    if "qcm_answers" not in st.session_state:
+                                        st.session_state.qcm_answers = [None]*len(qcm_questions)
+                                    if "qcm_submitted" not in st.session_state:
+                                        st.session_state.qcm_submitted = False
+
+                                    def open_qcm_modal():
+                                        st.session_state.show_qcm_modal = True
+                                        st.session_state.qcm_answers = [None]*len(qcm_questions)
+                                        st.session_state.qcm_submitted = False
+
+                                    def close_qcm_modal():
+                                        st.session_state.show_qcm_modal = False
+
+                                    st.button("📝 Passer le QCM (Quiz)", on_click=open_qcm_modal, key="open_qcm_modal_btn")
+
+                                    if st.session_state.show_qcm_modal:
+                                        import streamlit.components.v1 as components
+                                        # Overlay style for modal
+                                        modal_style = """
+                                        <style>
+                                        .qcm-modal-bg {position: fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.4); z-index:1000;}
+                                        .qcm-modal {position: fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:white; padding:2rem; border-radius:1rem; box-shadow:0 0 30px #0003; z-index:1001; min-width:350px; max-width:90vw; max-height:90vh; overflow:auto;}
+                                        .qcm-modal h3 {margin-top:0;}
+                                        .qcm-modal .qcm-close {position:absolute; top:1rem; right:1.5rem; font-size:1.5rem; cursor:pointer; color:#888;}
+                                        </style>
+                                        """
+                                        components.html(modal_style, height=0)
+                                        # Modal content
+                                        with st.container():
+                                            st.markdown('<div class="qcm-modal-bg"></div>', unsafe_allow_html=True)
+                                            st.markdown('<div class="qcm-modal">', unsafe_allow_html=True)
+                                            st.markdown('<span class="qcm-close" onclick="window.parent.postMessage(\'close_qcm_modal\', \'*\')">×</span>', unsafe_allow_html=True)
+                                            st.markdown("<h3>📝 QCM - Quiz d'entretien</h3>", unsafe_allow_html=True)
+                                            with st.form("qcm_form"):
+                                                for idx, q in enumerate(qcm_questions):
+                                                    st.markdown(f"**Q{idx+1}. {q['question']}**")
+                                                    st.radio(
+                                                        label="",
+                                                        options=["A", "B", "C", "D"],
+                                                        format_func=lambda x: f"{x}) {q['options'][ord(x)-65]}",
+                                                        key=f"qcm_answer_{idx}",
+                                                        index=(ord(st.session_state.qcm_answers[idx])-65) if st.session_state.qcm_answers[idx] else 0
+                                                    )
+                                                submitted = st.form_submit_button("Valider mes réponses")
+                                                if submitted:
+                                                    answers = [st.session_state.get(f"qcm_answer_{i}") for i in range(len(qcm_questions))]
+                                                    st.session_state.qcm_answers = answers
+                                                    st.session_state.qcm_submitted = True
+                                            if st.session_state.qcm_submitted:
+                                                score = sum(1 for i, q in enumerate(qcm_questions) if st.session_state.qcm_answers[i] == q['answer'])
+                                                st.markdown(f"<h4>Résultat: {score} / {len(qcm_questions)} corrects</h4>", unsafe_allow_html=True)
+                                                if score == len(qcm_questions):
+                                                    st.balloons()
+                                                else:
+                                                    st.info("Essayez à nouveau pour améliorer votre score !")
+                                            st.button("Fermer", on_click=close_qcm_modal, key="close_qcm_modal_btn")
+                                            st.markdown('</div>', unsafe_allow_html=True)
+
+                            else:
+                                st.write(response)
                             st.success(f"✅ {selected_agent_name} completed successfully!")
-                            
                         else:
                             st.error("❌ No response received from the agent")
-                            
                     except Exception as e:
                         st.error(f"❌ Error running {selected_agent_name}: {str(e)}")
             else:
