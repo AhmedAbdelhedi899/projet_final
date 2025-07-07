@@ -15,7 +15,7 @@ Pillow>=10.0.0
 
 # YOLO for face detection
 ultralytics>=8.0.0
-
+deepface
 # WebRTC for live camera
 streamlit-webrtc>=0.47.0
 av>=10.0.0
