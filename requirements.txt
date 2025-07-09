@@ -3,6 +3,7 @@ streamlit>=1.28.0
 requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.24.0
+groq>=0.4.0
 
 # PDF processing
 PyPDF2>=3.0.0
@@ -15,7 +16,7 @@ Pillow>=10.0.0
 
 # YOLO for face detection
 ultralytics>=8.0.0
-deepface
+deepface==0.0.93
 # WebRTC for live camera
 streamlit-webrtc>=0.47.0
 av>=10.0.0
