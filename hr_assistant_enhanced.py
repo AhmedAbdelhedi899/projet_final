@@ -27,7 +27,6 @@ if "groq_api_key" not in st.session_state:
         try:
             with open("api.txt", "r", encoding="utf-8") as f:
                 st.session_state.groq_api_key = f.read().strip()
-                print('')
                 if st.session_state.groq_api_key:
                     st.success("✅ Clé API Groq chargée depuis api.txt")
         except FileNotFoundError: 
