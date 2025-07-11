@@ -1,0 +1,80 @@
+FROM jenkins/jenkins:lts-jdk17
+
+USER root
+
+# Install Docker CLI using the updated method (no more apt-key)
+RUN apt-get update && \
+    apt-get -y install apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg \
+    software-properties-common && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get -y install docker-ce-cli
+
+# Install Docker Compose v2 (latest stable)
+RUN DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') && \
+    curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose && \
+    ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+
+# Install Python and pip (required for testing and validation)
+# Use python3-full to ensure venv support, and install pip using apt
+RUN apt-get update && \
+    apt-get install -y python3-full python3-pip python3-venv && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+
+# Create a virtual environment for pip packages
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Now we can safely upgrade pip in the virtual environment
+RUN /opt/venv/bin/pip install --upgrade pip
+
+# Set up proper permissions for Docker socket
+RUN mkdir -p /var/run/docker && \
+    chmod 775 /var/run/docker && \
+    groupadd -f docker && \
+    usermod -aG docker jenkins
+
+# Install necessary Jenkins plugins
+RUN jenkins-plugin-cli --plugins \
+    blueocean \
+    docker-workflow \
+    pipeline-utility-steps \
+    git \
+    credentials \
+    credentials-binding \
+    workflow-aggregator \
+    pipeline-stage-view \
+    docker-compose-build-step \
+    configuration-as-code \
+    job-dsl \
+    ansicolor \
+    timestamper \
+    build-timeout \
+    ws-cleanup \
+    matrix-auth \
+    role-strategy \
+    cloudbees-folder \
+    email-ext
+
+# Create a volume for Docker socket and set proper permissions
+VOLUME /var/run/docker.sock
+RUN chmod 666 /var/run/docker.sock || true
+
+# Switch back to the jenkins user
+USER jenkins
+
+# Skip the initial setup wizard
+ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false"
+
+# Create the init.groovy.d directory
+RUN mkdir -p /usr/share/jenkins/ref/init.groovy.d/
+
+# Copy setup script
+COPY jenkins-setup.groovy /usr/share/jenkins/ref/init.groovy.d/
